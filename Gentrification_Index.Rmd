@@ -1,0 +1,390 @@
+---
+title: "A Gentrification Index for Chicago"
+runtime: shiny
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+
+# Packages & WD
+library(tidyverse);library(sf);library(leaflet);library(leaflet.extras);
+library(geojsonio);library(geojsonsf);library(hrbrthemes);library(ggthemes);library(DT);
+library(shinyWidgets)
+setwd(here::here()) # preserves relative paths on others systems as long as they open in fresh session
+
+# Import data
+vars <- read.csv("GI_Values_Tidy.csv") # GI data
+vars$YEAR <- factor(vars$YEAR) # For grouping GI data by study period
+# cca <- st_read("Shapefiles/CCA_GI.shp") # CCA shapefiles
+# cca$CCA <- as.character(paste(cca$CCA))
+# colnames(cca)[1] <- "CCA.NUM"
+cca <- geojson_sf("CCA.geojson")
+
+# Global lists
+studyYears <- list(
+  "1970" = "1970", 
+  "1980" = "1980", 
+  "1990" = "1990", 
+  "2000" = "2000", 
+  "2010" = "2010", 
+  "2008 - 2012" = "2008 - 2012", 
+  "2013 - 2017" = "2013 - 2017"
+  )
+
+studyVars <- list( 
+  "Population" = "Population", 
+  "Median Family Income" = "Median Family Income", 
+  "Median Home value" = "Median Home Value", 
+  "Percent White Population" = "Pct White", 
+  "Percent Black Population" = "Pct Black", 
+  "Percent Latinx Population" = "Pct Hispanic", 
+  "Percent Children" = "Pct Children", 
+  "Percent Elderly" = "Pct Elderly", 
+  "Families in Poverty" = "Pct Families in Poverty", 
+  "Female Headed Households with Children" = "Pct Female Headed Household with Kids", 
+  "Owner-Occupied" = "Pct Owner Occupied", 
+  "Managerial or Prof. Workers" = "Pct Managerial or Professional Workers", 
+  "College Educated" = "Pct College Educated", 
+  "Private School Attendance" = "Pct Private School Attendance"
+  )
+
+# Import functions
+source("functions.R", local = TRUE) # required "local = TRUE" for shiny apps
+# index_table creates a table of GI values for the specified year
+# set_typology applies the GI types to each CCA
+# change_table creates the table that is joined to the CCA shapefile for use with leaflet. It uses both index_table and set_typology.
+# for gathering GI change, index, and population values simply run change_table(from, to)
+# For displaying the underlying values of the GI variables you'll need to use the vars table. 
+```
+
+
+Sidebar {.sidebar}
+======================================================================
+
+```{r inputs}
+
+shinyWidgets::sliderTextInput( # Slider input for study period selection
+  inputId = "studyPeriod", 
+  label = "Years:", 
+  choices = studyYears,
+  selected = c("1990", "2010"),
+  grid = TRUE,
+  from_max = "2008 - 2012",
+  to_min = "1980"
+  )
+
+selectInput('studyVar', label = "Index Variable", choices = studyVars, selected = "Population") # Input for the study variable used in the Over Time tab
+
+### Reactives
+studyVar <- reactive ({
+  input$studyVar
+})
+
+from <- reactive({ 
+  input$studyPeriod[1]
+})
+
+to <- reactive({
+  input$studyPeriod[2]
+})
+
+cca_gi <- reactive({ 
+  change_table(from(), to()) %>% 
+    left_join(cca, .) %>%
+    select(-Cmmnt_N, -CCA_Cmb)
+  })
+
+```
+
+Use the **sliders** and **dropdown menu** above to change the study period and focus on a specific variable in the **Over Time** tab.
+
+**Click** on a community area on the map to see more information about it.
+
+Use the **By Community Area** tab to examine gentrification index scores by Chicago Community Area.  
+
+Use the **Over Time** tab to investigate trends by neighborhood or index component over time.  
+
+To learn more about the project, click the **About** tab.  
+
+Application authors:  
+[Ethan Jantz](https://github.com/EthanJantz) and  
+[Sean Connelly](https://sean-connelly.github.io/) 
+
+[Voorhees Center](https://voorheescenter.uic.edu/)
+
+By Community Area
+======================================================================
+
+Row
+-----------------------------------------------------------------------
+
+### Gentrification Index Map
+
+```{r by CCA map}
+
+output$map <- renderLeaflet({
+
+  
+  # Palette
+  pal <- reactive({
+
+   colorFactor(
+     palette = c(
+       "#FFFC86",
+       "#FFFDB9",
+       "#B8CCE4",
+       "#4F81BC",
+       "#D1FFC0",
+       "#89CD66",
+       "#D5CEB5",
+       "#CDAA66",
+       "#886F46"),
+     levels = c(
+       "1 - Upper Class",
+       "2 - Middle Class",
+       "3 - Poverty",
+       "4 - Extreme Poverty",
+       "5 - Not Gentrification",
+       "6 - Gentrification", 
+       "7 - Mild Decline",
+       "8 - Moderate Decline",
+       "9 - Serious Decline"
+     ))
+    
+  })
+  
+  # Map
+  map <- leaflet(cca_gi()) %>%
+    addProviderTiles("CartoDB.Positron") %>%
+    clearShapes() %>%
+    addPolygons(stroke = TRUE, color = "#444444", weight = 1, smoothFactor = 0, 
+                fillColor = ~pal()(cca_gi()$type), fillOpacity = 0.8, 
+                layerId = ~CCA.NUM) %>%
+    addLegend(position = "bottomleft", pal = pal(), 
+              values = cca_gi()$type, title = "Gentrification Index<br>Value")
+  
+  map
+  
+})
+
+# Click event for the map (will use to generate chart)
+click_cca <- eventReactive(input$map_shape_click, {
+  
+  x <- input$map_shape_click
+  y <- x$id
+  return(y)
+  
+})
+
+# Add the clicked CCA to the map in aqua, and remove when a new one is clicked
+observe({
+  
+  req(click_cca()) # do this if click_cca() is not null
+  
+  map <- leafletProxy("map") %>%
+    removeShape("highlight_cca") %>%
+    addPolygons(data = cca_gi()[cca_gi()$CCA.NUM == click_cca(), ], fill = FALSE,
+                color = "#FF9933", opacity = 1, layerId = "highlight_cca")
+  
+})
+
+# Fetch data for the clicked CCA
+selected_cca <- reactive({
+  
+  if(is.null(input$map_shape_click)){
+  cca_gi()
+  } else {
+  cca_gi() %>% 
+    filter(CCA.NUM == click_cca())
+  }
+})
+
+leafletOutput("map")  
+
+```
+
+### Data, Selected Community Area (Click on the map to show table)
+
+```{r DataTable output}
+
+# Data table
+output$cca_table <- DT::renderDataTable({
+  
+  DT::datatable(selected_cca() %>% 
+                  st_drop_geometry() %>%
+                  mutate(CCA.NUM = as.numeric(CCA.NUM)) %>%
+                  arrange(CCA.NUM),
+                extensions = "Buttons",
+                options = list(dom = "Bfrtip",
+                               buttons = c("copy", "csv", "excel", "pdf", "print"),
+                               scrollX = TRUE,
+                               scrollY = TRUE))
+  
+  })
+
+DT::dataTableOutput("cca_table")
+
+```
+
+
+
+Over Time
+======================================================================
+
+Row
+-----------------------------------------------------------------------
+
+### Map
+
+```{r over time map}
+# This section will include a map similar to the one in the "By Community Area" section. 
+# The click event will allow the user to select which CCA they want to view details on
+# Alternatively, the user can select the CCA from a drop down menu
+output$map2 <- renderLeaflet({
+
+  
+  # Palette
+  pal <- reactive({
+    
+    # colorFactor(palette = c("#FEFD03", "#FFFFCD", "#B9CDE5", "#4F81BC", "#D2FFBE"),
+    #             domain = cca_gi()$type)
+   colorFactor(
+     palette = c(
+       "#FFFC86",
+       "#FFFDB9",
+       "#B8CCE4",
+       "#4F81BC",
+       "#D1FFC0",
+       "#89CD66",
+       "#D5CEB5",
+       "#CDAA66",
+       "#886F46"),
+     levels = c(
+       "1 - Upper Class",
+       "2 - Middle Class",
+       "3 - Poverty",
+       "4 - Extreme Poverty",
+       "5 - Not Gentrification",
+       "6 - Gentrification", 
+       "7 - Mild Decline",
+       "8 - Moderate Decline",
+       "9 - Serious Decline"
+     ))
+    
+  })
+  
+  # Map
+  map <- leaflet(cca_gi()) %>%
+    addProviderTiles("CartoDB.Positron") %>%
+    clearShapes() %>%
+    addPolygons(stroke = TRUE, color = "#444444", weight = 1, smoothFactor = 0, 
+                fillColor = ~pal()(cca_gi()$type), fillOpacity = 0.8, 
+                layerId = ~COMMUNITY.AREA) %>%
+    addLegend(position = "bottomleft", pal = pal(), 
+              values = cca_gi()$type, title = "Gentrification Index<br>Value")
+  
+  map
+  
+})
+
+# Click event for the map (will use to generate chart)
+click_cca.ot <- eventReactive(input$map2_shape_click, {
+  
+  x <- input$map2_shape_click
+  y <- x$id
+  return(y)
+  
+})
+
+# Add the clicked CCA to the map in aqua, and remove when a new one is clicked
+observe({
+  
+  req(click_cca.ot()) # do this if click_cca() is not null
+  
+  map <- leafletProxy("map2") %>%
+    removeShape("highlight_cca") %>%
+    addPolygons(data = cca_gi()[cca_gi()$COMMUNITY.AREA == click_cca.ot(), ], fill = FALSE,
+                color = "#FF9933", opacity = 1, layerId = "highlight_cca")
+  
+})
+
+# Fetch data for the clicked CCA
+selected_cca.ot <- reactive({
+  
+  if(is.null(input$map2_shape_click)){
+  cca_gi()
+  } else {
+  cca_gi() %>% 
+    filter(COMMUNITY.AREA == click_cca.ot())
+  }
+})
+
+leafletOutput("map2")  
+```
+
+
+### Chart
+
+```{r ot-chart}
+# A ggplot line graph of selecetd index values over time
+
+output$chart <- renderPlot({
+  req(click_cca.ot())
+  chart <- var_over_time(click_cca.ot(), from(), to(), studyVar())
+  chart
+})
+
+plotOutput("chart")
+
+```
+
+Row
+-----------------------------------------------------------------------
+
+### Selected CCA Yearly Values
+
+```{r ot-grid}
+output$cca_val_byYear <- DT::renderDataTable({
+  
+  req(click_cca.ot())
+  DT::datatable(vars %>%
+    filter(COMMUNITY.AREA == click_cca.ot()) %>%
+    pivot_wider(names_from = GI_VAR, values_from = VALUE) %>%
+    mutate_if(is.numeric, round, 1), 
+  extensions = "Buttons",
+  options = list(dom = "Bfrtip",
+  buttons = c("copy", "csv", "excel", "pdf", "print"),
+  scrollX = TRUE,
+  scrollY = TRUE))
+})
+
+DT::dataTableOutput("cca_val_byYear") 
+
+### Future possibilities
+# A table of the 14 GI components with icons showing their change during the study period
+# Green-Red icon to indicate change along with the start and end values from the ot-chart
+```
+
+
+About
+============================================================================
+
+The Socioeconomic Change of Chicago’s Community Areas, also known as the Gentrification Index, examines neighborhood change across Chicago from 1970 to 2010. It uses key indicators to measure how much a neighborhood's wealth or poverty has changed in this time.
+
+The [Socioeconomic Change of Chicago’s Community Areas (1970-2010)](http://voorheescenter.red.uic.edu/wp-content/uploads/sites/122/2017/10/Voorhees-Center-Gentrification-Index-Oct-14.pdf) shows that inequality is growing in Chicago. Some neighborhoods have grown wealthier, while others have grown poorer. At the same time, the number of middle-class neighborhoods has gone down.
+
+An Appendix, showing the detailed information for each community area, is also [available](http://voorheescenter.red.uic.edu/wp-content/uploads/sites/122/2017/10/Appendix-Oct-14.pdf).
+
+For information about how to mitigate the impact of gentrification, check out the [toolkit](http://voorheescenter.uic.edu/wp-content/uploads/sites/122/2017/10/Gentrification-and-Neighborhood-Change-Toolkit.pdf).
+
+To see presentations for the 2015 Voorhees Center symposium called *Taking Control of our Neighborhoods’ Future*, look [here](https://voorheescenter.wordpress.com/2015/05/27/investment-without-displacement-communities-gather-to-discuss-gentrification-at-the-voorhees-center-symposium/).
+
+Questions? Try the [Gentrification FAQ](http://voorheescenter.uic.edu/what-we-do/areas-of-research/gentrification-index/gentrification-faq/).
+
+For more, see WBEZ’s interactive website on gentrification [here](http://interactive.wbez.org/gentrification/).
+
+*Report Summary*: [English](http://voorheescenter.uic.edu/wp-content/uploads/sites/122/2018/03/GI-One-Pager.pdf), [Español](http://voorheescenter.uic.edu/wp-content/uploads/sites/122/2018/03/GI-Una-Pagina1.pdf)
